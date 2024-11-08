@@ -1,0 +1,146 @@
+---
+title: "covid"
+output: html_document
+date: "2024-10-26"
+---
+
+For my version of the covid 19 data project I will only analyze information from the US because the data is of finer granualrity. The data I will load specifically is the US deaths data. I am choosing deaths data because the number of cases, especially after the first year is likely a massive undercount. 
+
+## Load data
+```{r load data}
+url_covid_us_deaths <- 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv'
+
+covid_dataset <- read.csv(url_covid_us_deaths)
+library(factoextra)
+library(lubridate)
+library(cluster)
+library(tidyverse)
+```
+
+I will not display a summary of this data because it is a very large table. The data appears to be broken down over county, and time stamped by day. 
+
+The number of deaths appears to be cumulative, as a result if we want to find eeaths per day the key is to find the difference between the days. 
+
+Also if we wish to not do a time series analysis and just want to aggregate we can choose the latest date and we can then get the final count of deaths in each county. 
+
+```{r aggregate_by_state}
+colnames(covid_dataset) <- gsub("X|\\.", "/", colnames(covid_dataset))
+covid_dataset <- covid_dataset %>%
+  pivot_longer(cols = -c('Province_State','UID', 'iso2', 'iso3', 'code3', 'FIPS', 'Country_Region', 'Admin2', 'Lat', 'Long_', 'Combined_Key', 'Population'), names_to = 'date', values_to = 'deaths') %>%
+  select(-c('UID', 'iso2', 'iso3', 'code3', 'FIPS', 'Country_Region', 'Lat', 'Long_'))%>%
+  mutate(date = mdy(date))
+
+#result <- aggregate(. ~ Province_State, data = covid_dataset, FUN = sum)
+```
+
+Based on our data, the last day that data was collected was March 9th 2023. So we can just select that date to get a total count. 
+
+```{r select_latest_date}
+specific_date <- as.Date("2023-03-09")
+
+covid_dataset <- covid_dataset[covid_dataset$date == specific_date, ]
+```
+
+I would do a bit of feature enginnering here. Instead of total deaths, perhaps we can take a ratio of deaths against the population, and we get a death rate of sorts. But doing so would mean that we have to remove datapoints where population is 0. 
+
+```{r select_death_ratio}
+covid_dataset$death_ratio <- covid_dataset$deaths / covid_dataset$Population
+covid_dataset <- covid_dataset[!is.nan(covid_dataset$death_ratio) & is.finite(covid_dataset$death_ratio),]
+covid_dataset <- covid_dataset[covid_dataset$Population != 0, ]
+```
+Okay we can try to visualize our data on a 2d plane in terms of the population and the death rate
+```{r scatter_plot}
+plot(covid_dataset$Population, covid_dataset$death_ratio) 
+```
+
+For this report I will try an unsupervised learning technique known as k means clustering for modeling.  
+
+Truth be told I have not used k means clustering in R before, I have only used it in Python. So this is new. 
+
+Unsupervised learning is generally used to discover the underlying structure of the data, independent of a target variable. We can think of clustering as classification, but without a target variable to classify to.  
+
+CLustering in general is distance based so it's sensitive to the scaling of the data. So we should normalize the data so that the scales of the features are the same. 
+
+```{r normalize_function}
+min_max_normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))}
+```
+
+```{r scaling}
+covid_dataset_for_clustering <- covid_dataset[, c('death_ratio','Population')]
+covid_dataset_for_clustering$Population <- min_max_normalize(covid_dataset_for_clustering$Population)
+covid_dataset_for_clustering$death_ratio <- min_max_normalize(covid_dataset_for_clustering$death_ratio)
+```
+Let's make a scatter plot of this scaled data
+```{r scaled_scatter_plot}
+plot(covid_dataset_for_clustering$Population, covid_dataset_for_clustering$death_ratio) 
+```
+Okay, we are ready to try to find the best number of clusters. 
+
+The method I will use is a huristics known as the elbow method. Essentially we look for the elbow of the plot, the point where we balance the number of clusters with how well the clusters fit onto the data. In this case the latter is quantified by the total within sum of squares. 
+```{r elbow_plot}
+fviz_nbclust(covid_dataset_for_clustering, kmeans, method = "wss")
+#agnes(covid_dataset_for_clustering, method)
+```
+Based on the above plot the optimal number of clusters is 3 or 4. Let's go with 3 as a try then.
+```{r k_means}
+set.seed(121)
+
+km <- kmeans(covid_dataset_for_clustering, centers = 3, nstart = 25)
+
+km
+```
+Based on what the cluster means are, I can classify the clusters as roughly:
+1. high population/suburban/urban, correlated with low death rate
+2. low population/rural, correlated with high death rates
+3. intermediate population with intermediate death rates
+
+Now I will not go into the causes of the way the clusters are the way they are, that is another discussion for another day. 
+
+Let's visualize the clusters on 2 different scatter plots then. The first would be the scatter plot we had before, the second I will plot deaths against population to see the trends of each cluster
+```{r cluster_assignment_back_into_original_data}
+covid_dataset$cluster <- km$cluster
+plot(covid_dataset$Population,covid_dataset$death_ratio, col = covid_dataset$cluster)
+plot(covid_dataset$Population,covid_dataset$deaths, col = covid_dataset$cluster)
+```
+We can see here that the model has indeed separated counties based on the death rates, with high death rate counties in cluster 2, medium in cluster 3 and low in cluster 1. 
+
+The saparation here is rather uninteresting in a way, let' try something a bit different then, what happens when we log transform the population and do clustering again?
+
+```{r log_transform_population}
+covid_dataset$log_population <- log(covid_dataset$Population)
+plot(covid_dataset$log_population, covid_dataset$death_ratio) 
+```
+```{r scale_log}
+covid_dataset_for_clustering_log <- covid_dataset[, c('death_ratio','log_population')]
+covid_dataset_for_clustering_log$log_population <- min_max_normalize(covid_dataset_for_clustering_log$log_population)
+covid_dataset_for_clustering_log$death_ratio <- min_max_normalize(covid_dataset_for_clustering_log$death_ratio)
+fviz_nbclust(covid_dataset_for_clustering_log, kmeans, method = "wss")
+```
+This once again gives 3 clusters, let's see how this looks:
+```{r log_kmeans}
+set.seed(121)
+
+km_log <- kmeans(covid_dataset_for_clustering_log, centers = 3, nstart = 22)
+```
+
+```{r log_scatter_plot}
+covid_dataset$log_cluster <- km_log$cluster
+plot(covid_dataset$log_population,covid_dataset$death_ratio, col = covid_dataset$log_cluster)
+plot(covid_dataset$Population,covid_dataset$death_ratio, col = covid_dataset$log_cluster)
+```
+Looks like the result is quite different, the clusters here are basically high population, and rural regins with either high or low death rates. 
+
+## Colclusion
+
+In general the k means clustering models seem to be picking up on the general shape of the data and generally assigning data that appear dissimilar to each other a different cluster. Now this is the behavior we would expect for K means clustering as it is an unsupervised learning model meant for discovering the underlying structure of the data. We also see that k means clustering is sensitive to data scaling and distance as observed when we log transformed the data. This is to be expected and is the reason why I used normalization to the data prior to modeling to prevent any particular dimension of the data taking dominance from its larger number values and thus relatively larger distance.  
+
+## Possible source of bias
+
+For this dataset I would presume that all of the cases listed are of cases where a cause of death from COVID is confirmed. This property of the data leaves the possibility the deaths due to covid listed here is an under count. Why do I say this? Not everyone is diagnosed, so some of the causes of deaths may actually be covid but something else is listed. 
+
+Granted, I used the covid deaths data because deaths are much less likely to be under counted than infection cases since some folks may decide to recoup from home rather than seek medical help especially if their symptoms are not severe to begin with. As a result there may be many more infection cases than what has been documented in this dataset simply because a lot of infection cases are not reported. 
+
+I also avoided the international dataset because covid may be further under diagnosed in countries already with poorer healthcare access. Furthermore, we may also have to account for governments not counting deaths and cases, whether deliberate or not.
+
+It is for these reasons that I went with the US deaths data, the data that is less likely to have these biases. 
